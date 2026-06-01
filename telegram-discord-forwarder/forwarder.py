@@ -42,6 +42,15 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 # What to ping. Use "@here", "@everyone", or "" for no ping.
 MENTION = os.getenv("DISCORD_MENTION", "@here")
 SESSION_NAME = os.getenv("TELEGRAM_SESSION", "forwarder_session")
+# On startup, forward the most recent existing post so you see the latest pick
+# right away. Set to "false"/"0"/"no" to skip. How many to send: FORWARD_LAST_COUNT.
+FORWARD_LAST_ON_START = os.getenv("FORWARD_LAST_ON_START", "true").lower() not in (
+    "false",
+    "0",
+    "no",
+    "off",
+)
+FORWARD_LAST_COUNT = int(os.getenv("FORWARD_LAST_COUNT", "1"))
 
 DISCORD_MAX = 2000  # Discord hard limit per message
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -133,12 +142,9 @@ def post_discord(content=None, image_bytes=None, image_name="pick.jpg", mention=
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 
-@client.on(events.NewMessage(chats=CHANNEL))
-async def on_new_message(event):
-    msg = event.message
+async def forward_message(msg, mention=""):
+    """Forward one Telegram message (text and/or image) to Discord."""
     text = msg.message or ""
-    log.info("New post (id=%s, %d chars, media=%s)", msg.id, len(text), bool(msg.media))
-
     has_image = isinstance(msg.media, MessageMediaPhoto) or (
         isinstance(msg.media, MessageMediaDocument)
         and getattr(msg.media.document, "mime_type", "").startswith("image/")
@@ -151,12 +157,12 @@ async def on_new_message(event):
             buf.seek(0)
             # caption goes with the image; remaining chunks sent as follow-ups
             chunks = _chunk(text, DISCORD_MAX) if text else [""]
-            ok = post_discord(content=chunks[0], image_bytes=buf, mention=MENTION)
+            ok = post_discord(content=chunks[0], image_bytes=buf, mention=mention)
             for extra in chunks[1:]:
                 post_discord(content=extra)
         elif text:
             chunks = _chunk(text, DISCORD_MAX)
-            ok = post_discord(content=chunks[0], mention=MENTION)
+            ok = post_discord(content=chunks[0], mention=mention)
             for extra in chunks[1:]:
                 post_discord(content=extra)
         else:
@@ -171,6 +177,18 @@ async def on_new_message(event):
         log.exception("Error handling post id=%s", msg.id)
 
 
+@client.on(events.NewMessage(chats=CHANNEL))
+async def on_new_message(event):
+    msg = event.message
+    log.info(
+        "New post (id=%s, %d chars, media=%s)",
+        msg.id,
+        len(msg.message or ""),
+        bool(msg.media),
+    )
+    await forward_message(msg, mention=MENTION)
+
+
 async def main():
     await client.start()  # interactive login on first run (phone + code)
     me = await client.get_me()
@@ -180,6 +198,16 @@ async def main():
     entity = await client.get_entity(CHANNEL)
     title = getattr(entity, "title", getattr(entity, "username", CHANNEL))
     log.info("Watching channel: %s", title)
+
+    # On startup, forward the most recent existing post(s) so the latest pick
+    # shows up immediately instead of waiting for the next one.
+    if FORWARD_LAST_ON_START and FORWARD_LAST_COUNT > 0:
+        recent = await client.get_messages(entity, limit=FORWARD_LAST_COUNT)
+        # get_messages returns newest-first; send oldest-first so order reads right
+        for msg in reversed(recent):
+            log.info("Startup: forwarding last post id=%s", msg.id)
+            await forward_message(msg, mention=MENTION)
+
     log.info("Forwarding to Discord with mention=%r. Waiting for new posts...", MENTION)
 
     await client.run_until_disconnected()

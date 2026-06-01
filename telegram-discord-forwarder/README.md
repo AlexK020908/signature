@@ -137,6 +137,8 @@ That's it. It now starts on boot and restarts if it crashes.
 | `DISCORD_MENTION` | no | `@here` (default), `@everyone`, or blank |
 | `TELEGRAM_SESSION` | no | session filename (default `forwarder_session`) |
 | `LOG_LEVEL` | no | `INFO` (default) or `DEBUG` |
+| `FORWARD_LAST_ON_START` | no | `true` (default): on start, forward the most recent post so you see the latest pick immediately. `false` to skip. |
+| `FORWARD_LAST_COUNT` | no | how many recent posts to forward on start (default `1`) |
 
 ---
 
