@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegram -> Discord pick forwarder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/telegram-discord-forwarder
+EnvironmentFile=/home/ubuntu/telegram-discord-forwarder/.env
+ExecStart=/home/ubuntu/telegram-discord-forwarder/venv/bin/python forwarder.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/telegram-discord-forwarder/forwarder.log
+StandardError=append:/home/ubuntu/telegram-discord-forwarder/forwarder.log
+
+[Install]
+WantedBy=multi-user.target
