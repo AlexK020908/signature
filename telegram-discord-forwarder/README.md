@@ -42,14 +42,35 @@ polling, no missed messages while it's running.
   Easiest way to get it: set `LOG_LEVEL=DEBUG`, run the script once, and it logs
   the channels it sees, or temporarily set `TELEGRAM_CHANNEL` to any value and
   read the error. (Telegram desktop "Copy link" on a message also reveals it.)
+- **Multiple channels** → comma-separate them in `TELEGRAM_CHANNEL`, e.g.
+  `TELEGRAM_CHANNEL=@channelone, @channeltwo, -1001234567890`. Every channel
+  forwards to the same Discord webhook.
 
 ---
 
-## Run it locally first (to log in once)
+## Logging in (no terminal needed — done over Discord)
 
-The **first run is interactive** — Telegram texts you a login code. Do this on
-your laptop first so it's easy, then copy the generated `*.session` file to EC2
-(so the server never needs your phone).
+Telegram requires a one-time login (phone + code) to create a session. This
+project does that **through Discord** so it works on a headless server: when
+there's no valid session, the script connects a small Discord bot that asks for
+your phone number and login code in a channel, you reply there, and it signs in.
+Once the `*.session` file exists, every later start reuses it silently — the
+login flow never runs again unless the session is revoked.
+
+### One-time Discord bot setup
+
+1. <https://discord.com/developers/applications> → **New Application** → **Bot**
+   → **Reset Token** → copy into `DISCORD_BOT_TOKEN`.
+2. On the Bot page, turn on **MESSAGE CONTENT INTENT** (required to read your
+   replies).
+3. **OAuth2 → URL Generator** → scope **bot** → open the URL → add it to your
+   server.
+4. Enable **Developer Mode** (Discord Settings → Advanced), right-click the
+   channel the bot can see → **Copy Channel ID** → `DISCORD_AUTH_CHANNEL_ID`.
+   (Optional: right-click your name → **Copy User ID** → `DISCORD_OWNER_ID` to
+   only accept replies from you.)
+
+### Run it
 
 ```bash
 python -m venv venv
@@ -57,69 +78,67 @@ source venv/bin/activate            # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env                # Windows: copy .env.example .env
-# edit .env with your real values
+# edit .env with your real values (incl. the DISCORD_BOT_* vars above)
 
 python forwarder.py
 ```
 
-First run prompts:
+> You can run this first login either locally **or** straight on the server —
+> either way you reply in Discord, so the server never needs terminal input.
+
+On first run, the bot posts in your auth channel:
 ```
-Please enter your phone (or bot token): +1...
-Please enter the code you received: 12345
-# (2FA password if you have one)
+🔑 Telegram login needed. Reply with your phone number (e.g. +17786827953).
+📨 Code sent — check your Telegram app. Reply with the code.
+✅ Logged in as <you>. Forwarder is starting.
 ```
 
-After login it prints `Logged in as ...` and `Watching channel: ...`. Post
-something in the channel (or wait for a pick) and it should appear in Discord.
-A file like `forwarder_session.session` is now created — **that's your login**.
+Reply to each prompt in Discord. After `✅`, `forwarder_session.session` is
+created — **that's your login** — and the forwarder begins watching the channel.
 
 ---
 
-## Deploy to EC2 (Ubuntu, always-on)
+## Deploy to EC2 — CI/CD (recommended)
 
-### a. Launch
-A **t4g.nano** or **t3.micro** is plenty (this is tiny). Ubuntu 22.04/24.04 AMI.
+Deploys are automated via **GitHub Actions** running on a **self-hosted runner
+installed on the EC2 box itself** — so the job runs locally on the server, with
+**no SSH and no connection secrets**. All config that used to live in `.env` now
+lives in **GitHub Secrets**, and pushing to `main` ships the change. The pipeline
+(workflow + systemd unit + deploy scripts) lives in [`.cicd/`](.cicd/README.md) —
+see that README for the full secret list and the one-time runner install.
 
-### b. Copy the project up
-From your laptop, including the **already-logged-in** session file:
+In short:
+1. Launch a `t3.micro`/`t4g.nano` Ubuntu box.
+2. SSH in once and install the self-hosted runner as the `ubuntu` user
+   (Repo → Settings → Actions → Runners → New self-hosted runner gives the exact
+   commands + token; run with `--labels self-hosted,linux`).
+3. Add these GitHub **Secrets** (app config only — no host/key needed):
+   `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_CHANNEL`,
+   `DISCORD_WEBHOOK_URL`, `DISCORD_BOT_TOKEN`, `DISCORD_AUTH_CHANNEL_ID`,
+   `DISCORD_OWNER_ID` (optional).
+4. Push to `main` (or Actions → *Deploy forwarder to EC2* → *Run workflow*).
+
+The first deploy starts the service; reply to the Discord login bot once to
+create the `*.session` file, and every later deploy reuses it silently. The
+pipeline never deletes the live `.env` or session file on the box.
+
+### Manual deploy (no CI)
+
+If you'd rather not use Actions, copy the project up (including the
+already-logged-in `*.session` file and a hand-written `.env`) and run the same
+script CI uses:
 
 ```bash
 scp -i your-key.pem -r telegram-discord-forwarder ubuntu@<EC2_IP>:/home/ubuntu/
-```
-
-Make sure `.env` and `forwarder_session.session` came along (the `.gitignore`
-excludes them from git, but `scp -r` copies them).
-
-### c. Set up on the box
-
-```bash
 ssh -i your-key.pem ubuntu@<EC2_IP>
-cd /home/ubuntu/telegram-discord-forwarder
-
-sudo apt update && sudo apt install -y python3-venv
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
-
-# sanity check — should log in WITHOUT asking for a code (session reused)
-./venv/bin/python forwarder.py
-# Ctrl+C once you see "Waiting for new posts..."
+bash /home/ubuntu/telegram-discord-forwarder/.cicd/deploy.sh
 ```
 
-If it asks for a phone code here, the session file didn't transfer — re-copy it.
-
-### d. Install the service (auto-start + auto-restart)
-
-```bash
-sudo cp telegram-forwarder.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now telegram-forwarder
-```
-
-### e. Check it
+Then check it:
 
 ```bash
 systemctl status telegram-forwarder          # should be "active (running)"
-tail -f /home/ubuntu/telegram-discord-forwarder/forwarder.log
+journalctl -u telegram-forwarder -f
 ```
 
 That's it. It now starts on boot and restarts if it crashes.
@@ -133,8 +152,11 @@ That's it. It now starts on boot and restarts if it crashes.
 | `TELEGRAM_API_ID` | yes | from my.telegram.org |
 | `TELEGRAM_API_HASH` | yes | from my.telegram.org |
 | `TELEGRAM_CHANNEL` | yes | `@user`, `t.me/...` link, or numeric id |
-| `DISCORD_WEBHOOK_URL` | yes | Discord webhook URL |
+| `DISCORD_WEBHOOK_URL` | yes | Discord webhook URL (where picks are posted) |
 | `DISCORD_MENTION` | no | `@here` (default), `@everyone`, or blank |
+| `DISCORD_BOT_TOKEN` | first login | bot token for the Discord login flow |
+| `DISCORD_AUTH_CHANNEL_ID` | first login | channel id where the bot asks for phone/code |
+| `DISCORD_OWNER_ID` | no | restrict login replies to your user id |
 | `TELEGRAM_SESSION` | no | session filename (default `forwarder_session`) |
 | `LOG_LEVEL` | no | `INFO` (default) or `DEBUG` |
 | `FORWARD_LAST_ON_START` | no | `true` (default): on start, forward the most recent post so you see the latest pick immediately. `false` to skip. |
@@ -144,8 +166,13 @@ That's it. It now starts on boot and restarts if it crashes.
 
 ## Troubleshooting
 
-- **Asks for phone code on EC2** → session file not present/owned wrong. Re-`scp`
-  the `*.session` file; make sure it's in the WorkingDirectory.
+- **Triggers Discord login on EC2** → session file not present/owned wrong.
+  Re-`scp` the `*.session` file (must be in the WorkingDirectory), or just reply
+  to the bot's prompts to log in on the box directly.
+- **Bot never posts the login prompt** → check `DISCORD_BOT_TOKEN` /
+  `DISCORD_AUTH_CHANNEL_ID`, that the bot was invited to the server and can see
+  that channel, and that **MESSAGE CONTENT INTENT** is enabled in the Developer
+  Portal (without it, the bot can't read your replies).
 - **No posts forwarded** → confirm your account is actually a member of that
   channel and the id/username is right (run with `LOG_LEVEL=DEBUG`).
 - **`@here` not pinging** → the webhook posts to a channel; make sure your role

@@ -1,0 +1,7 @@
+# These run on Linux (CI runner + EC2). CRLF would break bash shebangs and the
+# systemd unit, so force LF regardless of the committer's platform.
+*.sh             text eol=lf
+*.service        text eol=lf
+.cicd/**         text eol=lf
+forwarder.py     text eol=lf
+requirements.txt text eol=lf
